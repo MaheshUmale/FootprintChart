@@ -24,7 +24,8 @@ def on_message(ws, message):
 def on_error(ws, error):
     print(error)
 
-def on_close(ws):
+
+def on_close(ws, close_status_code, close_msg):
     print("### closed ###")
 
 def on_open(ws):
@@ -42,7 +43,7 @@ def on_open(ws):
 def upstox_websocket():
     global ws
     ws = websocket.WebSocketApp(
-        "wss://api-v2.upstox.com/feed/market-data-feed",
+        "wss://api.upstox.com/v3",
         on_message=on_message,
         on_error=on_error,
         on_close=on_close,
@@ -104,4 +105,4 @@ if __name__ == '__main__':
     upstox_thread = threading.Thread(target=upstox_websocket)
     upstox_thread.start()
     current_instrument = "NSE_FO|45450"
-    socketio.run(app, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, port=5003, debug=False, allow_unsafe_werkzeug=True)
