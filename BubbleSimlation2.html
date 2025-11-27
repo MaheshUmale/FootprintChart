@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Trading Chart</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+    
+    <!-- ECharts CDN (Replacing Chart.js, Luxon, and Financial Plugin) -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8">
+
+    <div id="app" class="max-w-7xl mx-auto bg-white shadow-2xl rounded-xl p-4 sm:p-6 lg:p-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">
+            V3 Market Data Visualizer (Data Simulation)
+        </h1>
+
+        <!-- Controls Panel -->
+        <div class="flex flex-wrap gap-4 mb-8 p-4 bg-gray-50 rounded-lg shadow-inner">
+            
+            <!-- File Input -->
+            <div class="flex flex-col">
+                <label for="data-file-input" class="text-sm font-medium text-gray-700 mb-1">Load Data File (.txt or .json)</label>
+                <input type="file" id="data-file-input" accept=".txt,.json" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 text-sm file:mr-4 file:py-1 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+            </div>
+
+            <!-- Security Selector -->
+            <div class="flex flex-col">
+                <label for="security-select" class="text-sm font-medium text-gray-700 mb-1">Security</label>
+                <select id="security-select" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                    <!-- Options populated by JS -->
+                </select>
+            </div>
+            
+            <!-- Interval Input -->
+            <div class="flex flex-col">
+                <label for="interval-input" class="text-sm font-medium text-gray-700 mb-1">Interval (e.g., 30S, 1T)</label>
+                <input type="text" id="interval-input" value="30S" class="p-2 border border-gray-300 rounded-lg w-24 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+            
+            <!-- Threshold Input -->
+            <div class="flex flex-col">
+                <label for="threshold-input" class="text-sm font-medium text-gray-700 mb-1">Min Bubble Volume (Q)</label>
+                <input type="number" id="threshold-input" value="20" min="1" class="p-2 border border-gray-300 rounded-lg w-32 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+            </div>
+
+            <!-- Status Indicator -->
+            <div class="flex items-end ml-auto">
+                <div id="status-indicator" class="flex items-center p-2 rounded-full text-sm font-semibold transition duration-300 bg-gray-200 text-gray-700">
+                    <div class="w-2 h-2 rounded-full bg-gray-500 mr-2" id="status-dot"></div>
+                    <span id="status-text">Awaiting Data</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart Area -->
+        <div class="relative h-[60vh] bg-gray-100 rounded-lg p-2 shadow-inner">
+            <!-- Changed from canvas to div for ECharts -->
+            <div id="trading-chart" class="w-full h-full"></div> 
+            <div id="no-data-message" class="absolute inset-0 flex items-center justify-center bg-gray-100/90 text-gray-600 font-medium">
+                Select a data file or wait for the default simulation to start.
+            </div>
+        </div>
+
+        <!-- Debug/Live Data Feed -->
+        <div class="mt-6 p-4 bg-yellow-50 rounded-lg text-sm text-gray-700">
+            <p class="font-semibold text-yellow-800 mb-2">Simulation Log:</p>
+            <div id="last-update-info" class="font-mono text-xs overflow-x-auto h-16 overflow-y-scroll bg-white p-2 rounded">
+                System ready. Select a file or refresh to run default data.
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Logic -->
+    <script>
+        // --- Globals & Initial Setup ---
+        let tradingChart = null; // Will now hold the ECharts instance
+        let chartData = { ohlc: [], bubbles: [] };
+        let currentSecurity = 'NSE_FO|35415'; // Default security ID
+        let currentInterval = '30S';
+        let currentThreshold = 20;
+        let simulationTimeoutId; 
+        
+        let rawTradeData = []; 
+        let simulatedMessages = [];
+
+        // Initial Securities List (used if no file is loaded)
+        let INITIAL_SECURITIES = [
+            'NSE_FO|35415', 'NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_FO|35006'
+        ];
+        
+        // --- DEFAULT SIMULATED MARKET DATA (Mock WSS Messages) ---
+        const DEFAULT_SIMULATION_DATA = [
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.50,"ltt":1718188800000,"ltq":25}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.65,"ltt":1718188801000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.70,"ltt":1718188802000,"ltq":35}}}}', 
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.80,"ltt":1718188803000,"ltq":12}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.60,"ltt":1718188804000,"ltq":5}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.45,"ltt":1718188805000,"ltq":8}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.30,"ltt":1718188806000,"ltq":15}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.10,"ltt":1718188807000,"ltq":28}}}}', 
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.25,"ltt":1718188808000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.35,"ltt":1718188809000,"ltq":22}}}}', 
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.50,"ltt":1718188810000,"ltq":50}}}}', 
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.60,"ltt":1718188811000,"ltq":10}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.80,"ltt":1718188812000,"ltq":15}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21500.95,"ltt":1718188813000,"ltq":12}}}}',
+            '{"feeds":{"NSE_FO|35415":{"ltpc":{"ltp":21501.00,"ltt":1718188814000,"ltq":30}}}}' 
+        ];
+
+        simulatedMessages = [...DEFAULT_SIMULATION_DATA];
+
+        // --- UI & Status Helper (No change) ---
+        function updateStatus(state, message = '') {
+            const statusEl = document.getElementById('status-indicator');
+            const dotEl = document.getElementById('status-dot');
+            const textEl = document.getElementById('status-text');
+            const logEl = document.getElementById('last-update-info');
+
+            const time = new Date().toLocaleTimeString();
+            const newLogEntry = `<div>[${time}] ${message}</div>`;
+            const maxLogEntries = 100;
+            const logEntries = logEl.innerHTML.split('<div>').filter(e => e.trim().length > 0);
+            
+            // Prepend new log entry
+            logEl.innerHTML = newLogEntry + logEntries.slice(0, maxLogEntries - 1).map(e => `<div>${e}`).join('');
+
+
+            statusEl.classList.remove('bg-red-100', 'bg-green-100', 'bg-yellow-100', 'bg-gray-200');
+            dotEl.classList.remove('bg-red-500', 'bg-green-500', 'bg-yellow-500', 'bg-gray-500', 'animate-pulse');
+
+            if (state === 'OPEN') {
+                statusEl.classList.add('bg-green-100', 'text-green-700');
+                dotEl.classList.add('bg-green-500', 'animate-pulse');
+                textEl.textContent = 'Data Streaming';
+            } else if (state === 'CONNECTING') {
+                statusEl.classList.add('bg-yellow-100', 'text-yellow-700');
+                dotEl.classList.add('bg-yellow-500', 'animate-pulse');
+                textEl.textContent = 'Loading/Preparing Data...';
+            } else if (state === 'ERROR') {
+                statusEl.classList.add('bg-red-100', 'text-red-700');
+                dotEl.classList.add('bg-red-500');
+                textEl.textContent = 'Error Occurred';
+            } else if (state === 'CLOSED') {
+                statusEl.classList.add('bg-gray-200', 'text-gray-700');
+                dotEl.classList.add('bg-gray-500');
+                textEl.textContent = 'Simulation Complete';
+            }
+        }
+
+        // --- WebSocket Connection SIMULATION ---
+
+        function simulateWebSocket() {
+            // 1. Stop any existing simulation loop
+            if (simulationTimeoutId) {
+                clearTimeout(simulationTimeoutId);
+                simulationTimeoutId = null;
+            }
+            
+            // CRITICAL: Dispose of the ECharts instance before starting a new data stream
+            if (tradingChart) {
+                try {
+                     // ECharts equivalent of destroy
+                     echarts.dispose(tradingChart);
+                } catch(e) {
+                    console.error("Error during chart destruction (ECharts dispose):", e);
+                }
+                tradingChart = null; 
+            }
+
+            if (simulatedMessages.length === 0) {
+                 updateStatus('ERROR', 'No data to simulate. Please load a file or refresh.');
+                 return;
+            }
+
+            updateStatus('CONNECTING', `Starting data stream for ${simulatedMessages.length} trades on ${currentSecurity}.`);
+            
+            rawTradeData = []; // Clear previous trade history
+            drawChart([], []); // Clear chart visuals
+            document.getElementById('no-data-message').classList.remove('hidden');
+
+            let messageIndex = 0;
+            // Changed from 10ms to 0ms for near-instant processing of large historical files
+            const intervalDuration = 0; 
+
+            function sendNextMessage() {
+                if (messageIndex < simulatedMessages.length) {
+                    const message = simulatedMessages[messageIndex];
+                    handleWSSMessage(message); 
+                    messageIndex++;
+                    
+                    // Schedule the next message
+                    simulationTimeoutId = setTimeout(sendNextMessage, intervalDuration);
+                } else {
+                    updateStatus('CLOSED', `Data stream complete. Total messages processed: ${simulatedMessages.length}`);
+                    
+                    // Check if any trades were actually processed for the selected security
+                    if (rawTradeData.length === 0) {
+                        const securityId = currentSecurity;
+                        updateStatus('ERROR', `0 trades processed for ${securityId}. Check if your file contains data for this security ID.`);
+                        document.getElementById('no-data-message').classList.remove('hidden');
+                    }
+                }
+            }
+
+            setTimeout(() => {
+                updateStatus('OPEN', 'Data stream started.');
+                sendNextMessage();
+            }, 50); // Small initial delay to ensure chart rendering
+        }
+
+        // --- Security Selector Management, File Reading, Data Processing, Aggregation ---
+        
+        function updateSecuritySelector(newSecurityId) {
+            const selectEl = document.getElementById('security-select');
+            
+            // Ensure the dropdown is populated with the current set of securities
+            selectEl.innerHTML = '';
+            INITIAL_SECURITIES.forEach(sec => {
+                const option = document.createElement('option');
+                option.value = sec;
+                option.textContent = sec;
+                if (sec === newSecurityId) { 
+                    option.selected = true;
+                }
+                selectEl.appendChild(option);
+            });
+            
+            currentSecurity = newSecurityId; 
+        }
+
+        function readFileContents(file) {
+            updateStatus('CONNECTING', `Reading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
+            
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const content = e.target.result;
+                    let messages = content.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+                    
+                    if (messages.length === 0) {
+                        throw new Error("File contains no valid JSON lines.");
+                    }
+                    
+                    const uniqueSecurities = new Set();
+                    let firstInstrumentId = null;
+
+                    // Iterate through all messages to find all unique security IDs
+                    messages.forEach(line => {
+                        try {
+                            const data = JSON.parse(line);
+                            if (data.feeds) {
+                                const ids = Object.keys(data.feeds);
+                                ids.forEach(id => {
+                                    if (id && id.trim() !== '') {
+                                        uniqueSecurities.add(id);
+                                        if (firstInstrumentId === null) {
+                                            firstInstrumentId = id; // Store the first ID encountered
+                                        }
+                                    }
+                                });
+                            }
+                        } catch (e) {
+                            // Ignore parsing errors for malformed lines
+                        }
+                    });
+
+                    if (uniqueSecurities.size === 0) {
+                         throw new Error("File contains no valid trade data or instrument IDs.");
+                    }
+                    
+                    // CRITICAL: Overwrite the global security list with those found in the file
+                    INITIAL_SECURITIES.length = 0; 
+                    uniqueSecurities.forEach(id => INITIAL_SECURITIES.push(id));
+                    INITIAL_SECURITIES.sort();
+                    
+                    const startingSecurity = firstInstrumentId || INITIAL_SECURITIES[0];
+                    
+                    updateSecuritySelector(startingSecurity);
+                    
+                    simulatedMessages = messages;
+                    updateStatus('OPEN', `File loaded successfully: ${simulatedMessages.length} messages found for ${INITIAL_SECURITIES.length} securities.`);
+                    
+                    // Start the simulation with the newly loaded data/security
+                    simulateWebSocket();
+
+                } catch (error) {
+                    console.error("Error processing file content:", error);
+                    updateStatus('ERROR', `Failed to parse file: ${error.message}`);
+                }
+            };
+
+            reader.onerror = (error) => {
+                console.error("FileReader Error:", error);
+                updateStatus('ERROR', `File read error.`);
+            };
+
+            reader.readAsText(file);
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                readFileContents(file);
+            }
+        }
+
+        function handleWSSMessage(dataString) {
+            try {
+                const data = JSON.parse(dataString);
+                const feeds = data.feeds;
+                const instrument = currentSecurity; 
+
+                // Only process data for the currently selected security
+                if (feeds && feeds[instrument]) {
+                    const ltpc = feeds[instrument].ltpc;
+                    
+                    if (ltpc && ltpc.ltp !== undefined && ltpc.ltt !== undefined && ltpc.ltq !== undefined) {
+                        const newTrade = {
+                            time: new Date(parseInt(ltpc.ltt, 10)),
+                            price: parseFloat(ltpc.ltp),
+                            quantity: parseFloat(ltpc.ltq)
+                        };
+                        
+                        rawTradeData.push(newTrade);
+                        
+                        // Re-aggregate and redraw on every trade update
+                        const { ohlc, bubbles } = aggregateAndResample(rawTradeData, currentInterval, currentThreshold);
+                        chartData.ohlc = ohlc;
+                        chartData.bubbles = bubbles;
+
+                        drawChart(chartData.ohlc, chartData.bubbles);
+                        
+                        document.getElementById('no-data-message').classList.add('hidden');
+                    }
+                }
+            } catch (e) {
+                console.warn("Error processing WSS message:", e, dataString.substring(0, 100));
+            }
+        }
+
+        function aggregateAndResample(trades, interval, threshold) {
+            if (trades.length === 0) return { ohlc: [], bubbles: [] };
+
+            // 1. Group by Exact Timestamp (for bubble logic)
+            const exactAggregates = new Map(); 
+            
+            trades.forEach(trade => {
+                const ts = trade.time.getTime(); 
+                if (!exactAggregates.has(ts)) {
+                    exactAggregates.set(ts, { price: 0, quantity: 0, time: trade.time });
+                }
+                const agg = exactAggregates.get(ts);
+                agg.quantity += trade.quantity;
+                agg.price = trade.price; 
+            });
+
+            // Filter for high-quantity bubbles
+            const bubbles = Array.from(exactAggregates.values())
+                .filter(agg => agg.quantity >= threshold)
+                .map(agg => ({
+                    x: agg.time.getTime(), 
+                    y: agg.price,
+                    q: agg.quantity // Store raw quantity (Q)
+                }));
+
+
+            // 2. Resample to Candlesticks (OHLCV)
+            
+            let intervalMs = 0;
+            if (interval.endsWith('S')) {
+                intervalMs = parseInt(interval) * 1000;
+            } else if (interval.endsWith('T')) { 
+                intervalMs = parseInt(interval) * 60000;
+            } else {
+                console.error("Invalid interval format. Using 30S default.");
+                intervalMs = 30000;
+            }
+
+            const ohlcMap = new Map(); 
+            
+            trades.forEach(trade => {
+                const timeMs = trade.time.getTime();
+                // Determine the start time of the aggregation interval
+                const intervalStartMs = Math.floor(timeMs / intervalMs) * intervalMs;
+                
+                if (!ohlcMap.has(intervalStartMs)) {
+                    ohlcMap.set(intervalStartMs, {
+                        x: intervalStartMs,
+                        open: trade.price,
+                        high: trade.price,
+                        low: trade.price,
+                        close: trade.price,
+                        volume: 0
+                    });
+                }
+                
+                const candle = ohlcMap.get(intervalStartMs);
+                candle.high = Math.max(candle.high, trade.price);
+                candle.low = Math.min(candle.low, trade.price);
+                candle.close = trade.price; 
+                candle.volume += trade.quantity;
+            });
+            
+            const ohlc = Array.from(ohlcMap.values()).sort((a, b) => a.x - b.x);
+
+            return { ohlc, bubbles };
+        }
+
+
+        // --- Charting Logic (Updated for ECharts) ---
+
+        function drawChart(ohlcData, bubbleData) {
+            const chartDom = document.getElementById('trading-chart');
+            
+            if (ohlcData.length === 0) {
+                 document.getElementById('no-data-message').classList.remove('hidden');
+            } else {
+                 document.getElementById('no-data-message').classList.add('hidden');
+            }
+
+            // ECharts Initialization
+            if (!tradingChart) {
+                // Initialize ECharts instance on the dedicated div
+                tradingChart = echarts.init(chartDom, 'light', { renderer: 'canvas' });
+            }
+
+            // --- Data Transformation for ECharts ---
+            // ECharts OHLC requires [timestamp, open, close, low, high]
+            const ecOhlcData = ohlcData.map(d => [
+                d.x, 
+                d.open,
+                d.close,
+                d.low,
+                d.high
+            ]);
+
+            // ECharts Scatter (Bubble) requires [timestamp, price, size]
+            const ecBubbleData = bubbleData.map(d => [
+                d.x, 
+                d.y,
+                d.q // Pass raw quantity (Q) as the size parameter
+            ]);
+            
+            const option = {
+                title: {
+                    text: `${currentSecurity} Candlestick Chart (${currentInterval})`,
+                    left: 'center',
+                    textStyle: { fontSize: 16 }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    formatter: function (params) {
+                        let html = params[0].name + '<br/>';
+                        params.forEach(item => {
+                            if (item.seriesType === 'candlestick') {
+                                // Data is [time, open, close, low, high]
+                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>
+                                    OHLC: O:${item.data[1].toFixed(2)} C:${item.data[2].toFixed(2)} L:${item.data[3].toFixed(2)} H:${item.data[4].toFixed(2)}<br/>`;
+                            } else if (item.seriesType === 'scatter') {
+                                // Data is [time, price, raw_quantity]
+                                const quantity = item.data[2].toFixed(0);
+                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>
+                                    Bubble: Price: ${item.data[1].toFixed(2)} Q: ${quantity}<br/>`;
+                            }
+                        });
+                        return html;
+                    }
+                },
+                grid: {
+                    left: '10%',
+                    right: '10%',
+                    bottom: '15%'
+                },
+                xAxis: {
+                    type: 'time',
+                    scale: true,
+                    axisLine: { lineStyle: { color: '#333' } },
+                    splitLine: { show: true, lineStyle: { color: 'rgba(0,0,0,0.05)' } }
+                },
+                yAxis: {
+                    scale: true,
+                    axisLine: { lineStyle: { color: '#333' } },
+                    splitLine: { lineStyle: { color: 'rgba(0,0,0,0.1)' } }
+                },
+                series: [
+                    {
+                        name: 'Price (Candlestick)',
+                        type: 'candlestick',
+                        data: ecOhlcData,
+                        itemStyle: {
+                            color: 'rgb(24, 199, 137)', // Up color (Green)
+                            color0: 'rgb(234, 74, 90)', // Down color (Red)
+                            borderColor: 'rgb(24, 199, 137)',
+                            borderColor0: 'rgb(234, 74, 90)'
+                        },
+                        // Tooltip handled by the main tooltip formatter
+                    },
+                    {
+                        name: `Aggregated Q >= ${currentThreshold}`,
+                        type: 'scatter',
+                        data: ecBubbleData,
+                        symbolSize: function (data) {
+                            // data[2] is the raw quantity (Q)
+                            const rawQuantity = data[2];
+                            // Apply consistent scaling: Min size 5, Max size 30, scaled by Q/5
+                            const scaledSize = rawQuantity / 5;
+                            return Math.max(5, Math.min(30, scaledSize)); 
+                        },
+                        itemStyle: {
+                            color: 'rgba(255, 215, 0, 0.6)', // Yellow fill
+                            borderColor: 'rgba(255, 0, 0, 0.9)', // Red border
+                            borderWidth: 2
+                        },
+                        // Tooltip handled by the main tooltip formatter
+                    }
+                ]
+            };
+            
+            // Set new data and options. The { notMerge: true } flag ensures the chart is fully redrawn, 
+            // crucial for clearing old series when switching securities.
+            tradingChart.setOption(option, { notMerge: true });
+        }
+        
+        // --- Main Controller ---
+        
+        // Handles changes to Interval and Threshold, only re-aggregates existing data.
+        function handleAggregationChange() {
+            const newInterval = document.getElementById('interval-input').value.toUpperCase();
+            const newThreshold = parseInt(document.getElementById('threshold-input').value);
+
+            currentInterval = newInterval;
+            currentThreshold = newThreshold;
+
+            const { ohlc, bubbles } = aggregateAndResample(rawTradeData, currentInterval, currentThreshold);
+            chartData.ohlc = ohlc;
+            chartData.bubbles = bubbles;
+            
+            drawChart(chartData.ohlc, chartData.bubbles);
+            console.log(`Aggregation settings updated: Interval=${currentInterval}, Threshold=${currentThreshold}`);
+        }
+
+        // Handles change to Security ID, forcing a full data reset/resimulation.
+        function handleSecurityChange() {
+             const newSecurity = document.getElementById('security-select').value;
+             if (newSecurity !== currentSecurity) {
+                currentSecurity = newSecurity;
+                // Restart simulation: This clears rawTradeData, clears the chart, and re-runs 
+                // messages, which are filtered by the new 'currentSecurity' in handleWSSMessage.
+                simulateWebSocket();
+                console.log(`Security changed to: ${currentSecurity}. Restarting data stream.`);
+             }
+        }
+
+        function setupUI() {
+            updateSecuritySelector(currentSecurity);
+
+            // Set up all event listeners
+            document.getElementById('security-select').addEventListener('change', handleSecurityChange);
+            document.getElementById('interval-input').addEventListener('change', handleAggregationChange);
+            document.getElementById('threshold-input').addEventListener('change', handleAggregationChange);
+            document.getElementById('data-file-input').addEventListener('change', handleFileSelect);
+
+            // Add resize listener for ECharts responsiveness
+            window.addEventListener('resize', () => {
+                if (tradingChart) {
+                    tradingChart.resize();
+                }
+            });
+        }
+
+        // --- Initialization (No change) ---
+        window.onload = () => {
+            setupUI();
+            simulateWebSocket();
+            console.log("App initialized. ECharts loaded. WebSocket data simulation started with default data.");
+        };
+
+        // Boilerplate Firebase structure (Mandatory requirement, kept for compliance)
+        const __app_id = 'trading-app';
+        const __firebase_config = '{}'; 
+        const __initial_auth_token = undefined; 
+    </script>
+</body>
+</html>
