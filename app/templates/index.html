@@ -209,7 +209,7 @@
                     }
                 }
             } catch (e) {
-                console.warn("Error processing WSS message:", e, dataString.substring(0, 100));
+                console.warn("Error processing WSS message:", e, String(data).substring(0, 100));
             }
         }
 
