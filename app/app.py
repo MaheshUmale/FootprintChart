@@ -24,6 +24,7 @@ def on_message(ws, message):
 def on_error(ws, error):
     print(error)
 
+
 def on_close(ws, close_status_code, close_msg):
     print("### closed ###")
 
@@ -42,7 +43,7 @@ def on_open(ws):
 def upstox_websocket():
     global ws
     ws = websocket.WebSocketApp(
-        "wss://api.upstox.com/v2/feed/market-data-feed",
+        "wss://api.upstox.com/v3",
         on_message=on_message,
         on_error=on_error,
         on_close=on_close,
