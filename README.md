@@ -10,6 +10,7 @@ Bullish Signal: If price is rising, accompanied by large buy-side volume bubbles
 Bearish Signal: Conversely, falling prices with high sell-side volume and a decrease in Open Interest could indicate positions are being closed out (money flowing out), pointing to a potential reversal or exhaustion of the trend.
 Key Levels: Large volume accumulation (Point of Control) visible through volume bubbles on the footprint chart, combined with high Open Interest at a specific strike, often highlights strong support or resistance zones where significant market interest exists. 
 
+NIFTY_OptionChainData.csv and BANKNIFTY_OptionChainData.csv are option chain data file for NIFTY and BANKNIFTY.
 
 JS LIB : echarts.min.js
 BACKEND : SERVER : python FLASK APP 
