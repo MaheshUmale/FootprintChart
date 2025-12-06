@@ -3,456 +3,167 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Real-Time Trading Chart</title>
-    <!-- Tailwind CSS -->
+    <title>Footprint Chart</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Inter Font -->
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
-        body { font-family: 'Inter', sans-serif; }
-    </style>
-
-    <!-- ECharts CDN (Replacing Chart.js, Luxon, and Financial Plugin) -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-
 </head>
-<body class="bg-gray-50 min-h-screen p-4 sm:p-8">
-
-    <div id="app" class="max-w-7xl mx-auto bg-white shadow-2xl rounded-xl p-4 sm:p-6 lg:p-8">
-        <h1 class="text-3xl font-bold text-gray-800 mb-6 border-b pb-3">
-            V3 Market Data Visualizer (Live Data)
-        </h1>
-
-        <!-- Controls Panel -->
-        <div class="flex flex-wrap gap-4 mb-8 p-4 bg-gray-50 rounded-lg shadow-inner">
-            <!-- Security Selector -->
-            <div class="flex flex-col">
-                <label for="security-select" class="text-sm font-medium text-gray-700 mb-1">Security</label>
-                <select id="security-select" class="p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150">
-                    <!-- Options populated by JS -->
-                </select>
+<body class="bg-gray-100">
+    <div class="container mx-auto p-4">
+        <h1 class="text-2xl font-bold mb-4">Footprint Chart</h1>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="md:col-span-2">
+                <div id="chart" class="w-full h-96 bg-white rounded-lg shadow-md"></div>
             </div>
-
-            <!-- Interval Input -->
-            <div class="flex flex-col">
-                <label for="interval-input" class="text-sm font-medium text-gray-700 mb-1">Interval (e.g., 30S, 1T)</label>
-                <input type="text" id="interval-input" value="30S" class="p-2 border border-gray-300 rounded-lg w-24 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
-            </div>
-
-            <!-- Threshold Input -->
-            <div class="flex flex-col">
-                <label for="threshold-input" class="text-sm font-medium text-gray-700 mb-1">Min Bubble Volume (Q)</label>
-                <input type="number" id="threshold-input" value="20" min="1" class="p-2 border border-gray-300 rounded-lg w-32 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
-            </div>
-
-            <!-- Status Indicator -->
-            <div class="flex items-end ml-auto">
-                <div id="status-indicator" class="flex items-center p-2 rounded-full text-sm font-semibold transition duration-300 bg-gray-200 text-gray-700">
-                    <div class="w-2 h-2 rounded-full bg-gray-500 mr-2" id="status-dot"></div>
-                    <span id="status-text">Awaiting Data</span>
+            <div>
+                <div class="bg-white p-4 rounded-lg shadow-md">
+                    <h2 class="text-xl font-semibold mb-2">Open Interest</h2>
+                    <div id="oi-data" class="text-gray-700">Loading...</div>
+                </div>
+                <div class="bg-white p-4 mt-4 rounded-lg shadow-md">
+                    <h2 class="text-xl font-semibold mb-2">Instruments</h2>
+                    <select id="instrument-select" class="w-full p-2 border rounded-md"></select>
+                    <button id="replay-button" class="w-full bg-blue-500 text-white p-2 mt-2 rounded-md">Replay Chart</button>
                 </div>
             </div>
         </div>
-
-        <!-- Chart Area -->
-        <div class="relative h-[60vh] bg-gray-100 rounded-lg p-2 shadow-inner">
-            <!-- Changed from canvas to div for ECharts -->
-            <div id="trading-chart" class="w-full h-full"></div>
-            <div id="no-data-message" class="absolute inset-0 flex items-center justify-center bg-gray-100/90 text-gray-600 font-medium">
-                Connecting to server...
-            </div>
-        </div>
-
-        <!-- Debug/Live Data Feed -->
-        <div class="mt-6 p-4 bg-yellow-50 rounded-lg text-sm text-gray-700">
-            <p class="font-semibold text-yellow-800 mb-2">Live Data Log:</p>
-            <div id="last-update-info" class="font-mono text-xs overflow-x-auto h-16 overflow-y-scroll bg-white p-2 rounded">
-                Connecting to server...
-            </div>
-        </div>
     </div>
-
-    <!-- JavaScript Logic -->
     <script>
-        // --- Globals & Initial Setup ---
-        let tradingChart = null; // Will now hold the ECharts instance
-        let chartData = { ohlc: [], bubbles: [] };
-        let currentSecurity = 'NSE_FO|35415'; // Default security ID
-        let currentInterval = '30S';
-        let currentThreshold = 20;
-        let socket = null;
+        document.addEventListener('DOMContentLoaded', function () {
+            const chart = echarts.init(document.getElementById('chart'));
+            const oiDataElement = document.getElementById('oi-data');
+            const instrumentSelect = document.getElementById('instrument-select');
+            const replayButton = document.getElementById('replay-button');
+            const socket = io();
 
-        let rawTradeData = [];
+            let footprintData = [];
 
-        // Initial Securities List (used if no file is loaded)
-        let INITIAL_SECURITIES = [
-            'NSE_FO|35415', 'NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_FO|35006'
-        ];
-
-        // --- UI & Status Helper (No change) ---
-        function updateStatus(state, message = '') {
-            const statusEl = document.getElementById('status-indicator');
-            const dotEl = document.getElementById('status-dot');
-            const textEl = document.getElementById('status-text');
-            const logEl = document.getElementById('last-update-info');
-
-            const time = new Date().toLocaleTimeString();
-            const newLogEntry = `<div>[${time}] ${message}</div>`;
-            const maxLogEntries = 100;
-            const logEntries = logEl.innerHTML.split('<div>').filter(e => e.trim().length > 0);
-
-            // Prepend new log entry
-            logEl.innerHTML = newLogEntry + logEntries.slice(0, maxLogEntries - 1).map(e => `<div>${e}`).join('');
-
-
-            statusEl.classList.remove('bg-red-100', 'bg-green-100', 'bg-yellow-100', 'bg-gray-200');
-            dotEl.classList.remove('bg-red-500', 'bg-green-500', 'bg-yellow-500', 'bg-gray-500', 'animate-pulse');
-
-            if (state === 'OPEN') {
-                statusEl.classList.add('bg-green-100', 'text-green-700');
-                dotEl.classList.add('bg-green-500', 'animate-pulse');
-                textEl.textContent = 'Data Streaming';
-            } else if (state === 'CONNECTING') {
-                statusEl.classList.add('bg-yellow-100', 'text-yellow-700');
-                dotEl.classList.add('bg-yellow-500', 'animate-pulse');
-                textEl.textContent = 'Connecting...';
-            } else if (state === 'ERROR') {
-                statusEl.classList.add('bg-red-100', 'text-red-700');
-                dotEl.classList.add('bg-red-500');
-                textEl.textContent = 'Error Occurred';
-            } else if (state === 'CLOSED') {
-                statusEl.classList.add('bg-gray-200', 'text-gray-700');
-                dotEl.classList.add('bg-gray-500');
-                textEl.textContent = 'Disconnected';
+            function renderChart(data) {
+                const options = {
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: { type: 'shadow' }
+                    },
+                    grid: {
+                        left: '3%',
+                        right: '4%',
+                        bottom: '3%',
+                        containLabel: true
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: data.map(item => item.price)
+                    },
+                    yAxis: {
+                        type: 'value',
+                        name: 'Volume'
+                    },
+                    series: [
+                        {
+                            name: 'Buy Volume',
+                            type: 'bar',
+                            stack: 'total',
+                            label: { show: true },
+                            emphasis: { focus: 'series' },
+                            data: data.map(item => item.buy)
+                        },
+                        {
+                            name: 'Sell Volume',
+                            type: 'bar',
+                            stack: 'total',
+                            label: { show: true },
+                            emphasis: { focus: 'series' },
+                            data: data.map(item => item.sell)
+                        },
+                        {
+                            name: 'Volume Bubbles',
+                            type: 'scatter',
+                            symbolSize: function (val, params) {
+                                const item = data[params.dataIndex];
+                                return (item.buy + item.sell) / 10;
+                            },
+                            data: data.map(item => [item.price, (item.buy + item.sell)]),
+                            itemStyle: {
+                                color: 'rgba(255, 215, 0, 0.5)'
+                            }
+                        }
+                    ]
+                };
+                chart.setOption(options);
             }
-        }
 
-        // --- WebSocket Connection ---
-        function connectWebSocket() {
-            socket = io();
+            function updateFootprintData(newData) {
+                const { ts, footprint } = newData;
+                const formattedData = Object.entries(footprint).map(([price, volumes]) => ({
+                    price,
+                    buy: volumes.buy,
+                    sell: volumes.sell
+                })).sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
+
+                footprintData = formattedData;
+                renderChart(footprintData);
+            }
 
             socket.on('connect', () => {
-                updateStatus('OPEN', 'Connected to the server.');
-                rawTradeData = []; // Clear data on new connection
-                drawChart([], []);
-                document.getElementById('no-data-message').classList.remove('hidden');
+                console.log('Connected to WebSocket');
             });
 
-            socket.on('disconnect', () => {
-                updateStatus('CLOSED', 'Disconnected from the server.');
+            socket.on('footprint_data', (data) => {
+                updateFootprintData(data);
             });
 
-            socket.on('connect_error', (err) => {
-                updateStatus('ERROR', `Connection error: ${err.message}`);
+            socket.on('footprint_update', (data) => {
+                updateFootprintData(data);
             });
 
-            socket.on('historical_data', (dataString) => {
-                const data = JSON.parse(dataString);
-                data.forEach((d) => handleWSSMessage(d, true));
-                updateStatus('OPEN', 'Receiving live data...');
-            });
-
-            socket.on('live_feed', (dataString) => {
-                handleWSSMessage(dataString, false);
-                updateStatus('OPEN', 'Receiving live data...');
-            });
-        }
-
-        // --- Security Selector Management, Data Processing, Aggregation ---
-
-        function updateSecuritySelector(newSecurityId) {
-            const selectEl = document.getElementById('security-select');
-
-            // Ensure the dropdown is populated with the current set of securities
-            selectEl.innerHTML = '';
-            INITIAL_SECURITIES.forEach(sec => {
-                const option = document.createElement('option');
-                option.value = sec;
-                option.textContent = sec;
-                if (sec === newSecurityId) {
-                    option.selected = true;
-                }
-                selectEl.appendChild(option);
-            });
-
-            currentSecurity = newSecurityId;
-        }
-
-        function handleWSSMessage(data, isObject) {
-            try {
-                const parsedData = isObject ? data : JSON.parse(data);
-                const feeds = parsedData.feeds;
-                const instrument = currentSecurity;
-
-                // Only process data for the currently selected security
-                if (feeds && feeds[instrument]) {
-                    const ltpc = feeds[instrument].ltpc;
-
-                    if (ltpc && ltpc.ltp !== undefined && ltpc.ltt !== undefined && ltpc.ltq !== undefined) {
-                        const newTrade = {
-                            time: new Date(parseInt(ltpc.ltt, 10)),
-                            price: parseFloat(ltpc.ltp),
-                            quantity: parseFloat(ltpc.ltq)
-                        };
-
-                        rawTradeData.push(newTrade);
-
-                        // Re-aggregate and redraw on every trade update
-                        const { ohlc, bubbles } = aggregateAndResample(rawTradeData, currentInterval, currentThreshold);
-                        chartData.ohlc = ohlc;
-                        chartData.bubbles = bubbles;
-
-                        drawChart(chartData.ohlc, chartData.bubbles);
-
-                        document.getElementById('no-data-message').classList.add('hidden');
-                    }
-                }
-            } catch (e) {
-                console.warn("Error processing WSS message:", e, String(data).substring(0, 100));
-            }
-        }
-
-        function aggregateAndResample(trades, interval, threshold) {
-            if (trades.length === 0) return { ohlc: [], bubbles: [] };
-
-            // 1. Group by Exact Timestamp (for bubble logic)
-            const exactAggregates = new Map();
-
-            trades.forEach(trade => {
-                const ts = trade.time.getTime();
-                if (!exactAggregates.has(ts)) {
-                    exactAggregates.set(ts, { price: 0, quantity: 0, time: trade.time });
-                }
-                const agg = exactAggregates.get(ts);
-                agg.quantity += trade.quantity;
-                agg.price = trade.price;
-            });
-
-            // Filter for high-quantity bubbles
-            const bubbles = Array.from(exactAggregates.values())
-                .filter(agg => agg.quantity >= threshold)
-                .map(agg => ({
-                    x: agg.time.getTime(),
-                    y: agg.price,
-                    q: agg.quantity // Store raw quantity (Q)
-                }));
-
-
-            // 2. Resample to Candlesticks (OHLCV)
-
-            let intervalMs = 0;
-            if (interval.endsWith('S')) {
-                intervalMs = parseInt(interval) * 1000;
-            } else if (interval.endsWith('T')) {
-                intervalMs = parseInt(interval) * 60000;
-            } else {
-                console.error("Invalid interval format. Using 30S default.");
-                intervalMs = 30000;
-            }
-
-            const ohlcMap = new Map();
-
-            trades.forEach(trade => {
-                const timeMs = trade.time.getTime();
-                // Determine the start time of the aggregation interval
-                const intervalStartMs = Math.floor(timeMs / intervalMs) * intervalMs;
-
-                if (!ohlcMap.has(intervalStartMs)) {
-                    ohlcMap.set(intervalStartMs, {
-                        x: intervalStartMs,
-                        open: trade.price,
-                        high: trade.price,
-                        low: trade.price,
-                        close: trade.price,
-                        volume: 0
+            fetch('/api/instruments')
+                .then(response => response.json())
+                .then(instruments => {
+                    instruments.forEach(instrument => {
+                        const option = document.createElement('option');
+                        option.value = instrument;
+                        option.textContent = instrument;
+                        instrumentSelect.appendChild(option);
                     });
-                }
+                });
 
-                const candle = ohlcMap.get(intervalStartMs);
-                candle.high = Math.max(candle.high, trade.price);
-                candle.low = Math.min(candle.low, trade.price);
-                candle.close = trade.price;
-                candle.volume += trade.quantity;
-            });
-
-            const ohlc = Array.from(ohlcMap.values()).sort((a, b) => a.x - b.x);
-
-            return { ohlc, bubbles };
-        }
-
-
-        // --- Charting Logic (Updated for ECharts) ---
-        function drawChart(ohlcData, bubbleData) {
-            const chartDom = document.getElementById('trading-chart');
-
-            if (ohlcData.length === 0) {
-                 document.getElementById('no-data-message').classList.remove('hidden');
-            } else {
-                 document.getElementById('no-data-message').classList.add('hidden');
+            function fetchOIData(instrument) {
+                fetch(`/api/oi_data/${instrument}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            oiDataElement.innerHTML = `<p class="text-red-500">${data.error}</p>`;
+                        } else {
+                            oiDataElement.innerHTML = `
+                                <p><strong>Open Interest:</strong> ${data.open_interest}</p>
+                                <p><strong>OI Change:</strong> ${data.oi_change}</p>
+                            `;
+                        }
+                    });
             }
 
-            // ECharts Initialization
-            if (!tradingChart) {
-                // Initialize ECharts instance on the dedicated div
-                tradingChart = echarts.init(chartDom, 'light', { renderer: 'canvas' });
-            }
-
-            // --- Data Transformation for ECharts ---
-            // ECharts OHLC requires [timestamp, open, close, low, high]
-            const ecOhlcData = ohlcData.map(d => [
-                d.x,
-                d.open,
-                d.close,
-                d.low,
-                d.high
-            ]);
-
-            // ECharts Scatter (Bubble) requires [timestamp, price, size]
-            const ecBubbleData = bubbleData.map(d => [
-                d.x,
-                d.y,
-                d.q // Pass raw quantity (Q) as the size parameter
-            ]);
-
-            const option = {
-                title: {
-                    text: `${currentSecurity} Candlestick Chart (${currentInterval})`,
-                    left: 'center',
-                    textStyle: { fontSize: 16 }
-                },
-                tooltip: {
-                    trigger: 'axis',
-                    axisPointer: { type: 'cross' },
-                    formatter: function (params) {
-                        let html = params[0].name + '<br/>';
-                        params.forEach(item => {
-                            if (item.seriesType === 'candlestick') {
-                                // Data is [time, open, close, low, high]
-                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>
-                                    OHLC: O:${item.data[1].toFixed(2)} C:${item.data[2].toFixed(2)} L:${item.data[3].toFixed(2)} H:${item.data[4].toFixed(2)}<br/>`;
-                            } else if (item.seriesType === 'scatter') {
-                                // Data is [time, price, raw_quantity]
-                                const quantity = item.data[2].toFixed(0);
-                                html += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>
-                                    Bubble: Price: ${item.data[1].toFixed(2)} Q: ${quantity}<br/>`;
-                            }
-                        });
-                        return html;
-                    }
-                },
-                grid: {
-                    left: '10%',
-                    right: '10%',
-                    bottom: '15%'
-                },
-                xAxis: {
-                    type: 'time',
-                    scale: true,
-                    axisLine: { lineStyle: { color: '#333' } },
-                    splitLine: { show: true, lineStyle: { color: 'rgba(0,0,0,0.05)' } }
-                },
-                yAxis: {
-                    scale: true,
-                    axisLine: { lineStyle: { color: '#333' } },
-                    splitLine: { lineStyle: { color: 'rgba(0,0,0,0.1)' } }
-                },
-                series: [
-                    {
-                        name: 'Price (Candlestick)',
-                        type: 'candlestick',
-                        data: ecOhlcData,
-                        itemStyle: {
-                            color: 'rgb(24, 199, 137)', // Up color (Green)
-                            color0: 'rgb(234, 74, 90)', // Down color (Red)
-                            borderColor: 'rgb(24, 199, 137)',
-                            borderColor0: 'rgb(234, 74, 90)'
-                        },
-                        // Tooltip handled by the main tooltip formatter
-                    },
-                    {
-                        name: `Aggregated Q >= ${currentThreshold}`,
-                        type: 'scatter',
-                        data: ecBubbleData,
-                        symbolSize: function (data) {
-                            // data[2] is the raw quantity (Q)
-                            const rawQuantity = data[2];
-                            // Apply consistent scaling: Min size 5, Max size 30, scaled by Q/5
-                            const scaledSize = rawQuantity / 5;
-                            return Math.max(5, Math.min(30, scaledSize));
-                        },
-                        itemStyle: {
-                            color: 'rgba(255, 215, 0, 0.6)', // Yellow fill
-                            borderColor: 'rgba(255, 0, 0, 0.9)', // Red border
-                            borderWidth: 2
-                        },
-                        // Tooltip handled by the main tooltip formatter
-                    }
-                ]
-            };
-
-            // Set new data and options. The { notMerge: true } flag ensures the chart is fully redrawn,
-            // crucial for clearing old series when switching securities.
-            tradingChart.setOption(option, { notMerge: true });
-        }
-
-        // --- Main Controller ---
-
-        // Handles changes to Interval and Threshold, only re-aggregates existing data.
-        function handleAggregationChange() {
-            const newInterval = document.getElementById('interval-input').value.toUpperCase();
-            const newThreshold = parseInt(document.getElementById('threshold-input').value);
-
-            currentInterval = newInterval;
-            currentThreshold = newThreshold;
-
-            const { ohlc, bubbles } = aggregateAndResample(rawTradeData, currentInterval, currentThreshold);
-            chartData.ohlc = ohlc;
-            chartData.bubbles = bubbles;
-
-            drawChart(chartData.ohlc, chartData.bubbles);
-            console.log(`Aggregation settings updated: Interval=${currentInterval}, Threshold=${currentThreshold}`);
-        }
-
-        // Handles change to Security ID, forcing a full data reset/resimulation.
-        function handleSecurityChange() {
-             const newSecurity = document.getElementById('security-select').value;
-             if (newSecurity !== currentSecurity) {
-                currentSecurity = newSecurity;
-                rawTradeData = []; // Clear data when security changes
-                drawChart([], []);
-                socket.emit('change_security', newSecurity);
-                console.log(`Security changed to: ${currentSecurity}.`);
-             }
-        }
-
-        function setupUI() {
-            updateSecuritySelector(currentSecurity);
-
-            // Set up all event listeners
-            document.getElementById('security-select').addEventListener('change', handleSecurityChange);
-            document.getElementById('interval-input').addEventListener('change', handleAggregationChange);
-            document.getElementById('threshold-input').addEventListener('change', handleAggregationChange);
-
-            // Add resize listener for ECharts responsiveness
-            window.addEventListener('resize', () => {
-                if (tradingChart) {
-                    tradingChart.resize();
-                }
+            instrumentSelect.addEventListener('change', (event) => {
+                const selectedInstrument = event.target.value;
+                socket.emit('change_security', selectedInstrument);
+                fetchOIData(selectedInstrument);
             });
-        }
 
-        // --- Initialization (No change) ---
-        window.onload = () => {
-            setupUI();
-            connectWebSocket();
-            console.log("App initialized. ECharts loaded. Attempting WebSocket connection.");
-        };
+            replayButton.addEventListener('click', () => {
+                const selectedInstrument = instrumentSelect.value;
+                footprintData = [];
+                renderChart(footprintData);
+                socket.emit('replay_market_data', selectedInstrument);
+            });
 
-        // Boilerplate Firebase structure (Mandatory requirement, kept for compliance)
-        const __app_id = 'trading-app';
-        const __firebase_config = '{}';
-        const __initial_auth_token = undefined;
+            // Fetch initial OI data
+            fetch('/api/instruments')
+                .then(response => response.json())
+                .then(instruments => {
+                    if (instruments.length > 0) {
+                        fetchOIData(instruments[0]);
+                    }
+                });
+        });
     </script>
 </body>
 </html>
