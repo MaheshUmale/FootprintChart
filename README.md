@@ -2,20 +2,24 @@
 Using market data  Feed and MONGODB generate FOOTPrint chart
  Chart Type: A Footprint Chart (Cluster Chart) is used, which replaces traditional candlesticks with detailed volume data at each price level within a given time frame.
 Volume Bubbles (Cluster Volume): Within each bar of the footprint chart, numerical values represent the volume traded at specific price points. The size or color of these "bubbles" (cells) indicates relative volume, often differentiating between aggressive buyers (asks hit) and aggressive sellers (bids hit).
-Open Interest Change: A separate panel or a heatmap overlay can be used to display the change in Open Interest for specific strike prices or for the entire option contract. 
+Open Interest Change: A separate panel or a heatmap overlay can be used to display the change in Open Interest for specific strike prices or for the entire option contract.
+
+CVD Chart: A separate panel below the main chart displays the Cumulative Volume Delta (CVD), which is the cumulative difference between buying and selling volume.
+
+Replay Feature: The application includes a replay feature that allows users to replay historical market data. The replay speed can be adjusted to allow for detailed analysis.
 
 Interpretation for Options Trading
-Traders combine these data points to confirm market direction and identify institutional activity. 
+Traders combine these data points to confirm market direction and identify institutional activity.
 Bullish Signal: If price is rising, accompanied by large buy-side volume bubbles in the footprint and a significant positive change in Open Interest, it suggests new money is entering long positions, confirming the upward trend.
 Bearish Signal: Conversely, falling prices with high sell-side volume and a decrease in Open Interest could indicate positions are being closed out (money flowing out), pointing to a potential reversal or exhaustion of the trend.
-Key Levels: Large volume accumulation (Point of Control) visible through volume bubbles on the footprint chart, combined with high Open Interest at a specific strike, often highlights strong support or resistance zones where significant market interest exists. 
+Key Levels: Large volume accumulation (Point of Control) visible through volume bubbles on the footprint chart, combined with high Open Interest at a specific strike, often highlights strong support or resistance zones where significant market interest exists.
 
 NIFTY_OptionChainData.csv and BANKNIFTY_OptionChainData.csv are option chain data file for NIFTY and BANKNIFTY.
 
 JS LIB : echarts.min.js
 BACKEND : SERVER : python FLASK APP 
 DB : MONGODB
-MONGO_URI = "mongodb://localhost:27017/" 
+MONGO_URI = "mongodb://localhost:27017/"
 MONGO_DB_NAME = "upstox_strategy_db"
 TICK_COLLECTION = "tick_data"
 WSS LIVE FEED STRUCTURE :

@@ -5,7 +5,6 @@ from pymongo import MongoClient
 import websocket
 import threading
 import pandas as pd
-
 app = Flask(__name__)
 socketio = SocketIO(app)
 ws = None
@@ -195,11 +194,14 @@ def change_security(instrument_key):
     current_instrument = instrument_key
 
 @socketio.on('replay_market_data')
-def replay_market_data(instrument_key):
+def replay_market_data(data):
     global aggregated_bar
-    print(f"Replaying market data for {instrument_key}")
+    instrument_key = data['instrument_key']
+    speed = int(data['speed'])
+    print(f"Replaying market data for {instrument_key} with speed {speed}ms")
     historical_data = list(collection.find({'instrumentKey': instrument_key}))
 
+    tick_count = 0
     for data in historical_data:
         try:
             if 'fullFeed' not in data or 'marketFF' not in data['fullFeed']:
@@ -260,7 +262,10 @@ def replay_market_data(instrument_key):
                 aggregated_bar['footprint'][price_level][side] += trade_qty
 
             socketio.emit('footprint_update', aggregated_bar)
-            socketio.sleep(0.1) # Add a small delay to simulate real-time playback
+
+            tick_count += 1
+            if tick_count % 100 == 0 and speed > 0:
+                socketio.sleep(speed / 1000)
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
             print(f"Error processing message during replay: {e} - Data: {str(data)[:200]}")
 

@@ -14,6 +14,7 @@
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div class="md:col-span-2">
                 <div id="chart" class="w-full h-96 bg-white rounded-lg shadow-md"></div>
+                <div id="cvd-chart" class="w-full h-48 mt-4 bg-white rounded-lg shadow-md"></div>
             </div>
             <div>
                 <div class="bg-white p-4 rounded-lg shadow-md">
@@ -23,7 +24,16 @@
                 <div class="bg-white p-4 mt-4 rounded-lg shadow-md">
                     <h2 class="text-xl font-semibold mb-2">Instruments</h2>
                     <select id="instrument-select" class="w-full p-2 border rounded-md"></select>
-                    <button id="replay-button" class="w-full bg-blue-500 text-white p-2 mt-2 rounded-md">Replay Chart</button>
+                    <div class="flex items-center mt-2">
+                        <select id="replay-speed-select" class="w-full p-2 border rounded-md">
+                            <option value="0">No Delay</option>
+                            <option value="10">10ms</option>
+                            <option value="20">20ms</option>
+                            <option value="50">50ms</option>
+                            <option value="100">100ms</option>
+                        </select>
+                        <button id="replay-button" class="w-full bg-blue-500 text-white p-2 ml-2 rounded-md">Replay Chart</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -31,12 +41,48 @@
     <script>
         document.addEventListener('DOMContentLoaded', function () {
             const chart = echarts.init(document.getElementById('chart'));
+            const cvdChart = echarts.init(document.getElementById('cvd-chart'));
             const oiDataElement = document.getElementById('oi-data');
             const instrumentSelect = document.getElementById('instrument-select');
             const replayButton = document.getElementById('replay-button');
             const socket = io();
 
             let footprintData = [];
+            let cvdData = [];
+
+            function renderCvdChart(data) {
+                const options = {
+                    tooltip: {
+                        trigger: 'axis'
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: data.map(item => item.ts)
+                    },
+                    yAxis: {
+                        type: 'value',
+                        name: 'CVD'
+                    },
+                    series: [
+                        {
+                            name: 'CVD',
+                            type: 'line',
+                            data: data.map(item => item.cvd)
+                        }
+                    ]
+                };
+                cvdChart.setOption(options);
+            }
+
+            function updateCvdData(newData) {
+                const { ts, footprint } = newData;
+                const buyVolume = Object.values(footprint).reduce((total, a) => total + a.buy, 0);
+                const sellVolume = Object.values(footprint).reduce((total, a) => total + a.sell, 0);
+                const cvd = buyVolume - sellVolume;
+
+                cvdData.push({ ts, cvd });
+                renderCvdChart(cvdData);
+            }
 
             function renderChart(data) {
                 const options = {
@@ -77,15 +123,42 @@
                         },
                         {
                             name: 'Volume Bubbles',
-                            type: 'scatter',
-                            symbolSize: function (val, params) {
+                            type: 'custom',
+                            renderItem: function (params, api) {
                                 const item = data[params.dataIndex];
-                                return (item.buy + item.sell) / 10;
+                                const [price, volume] = api.value();
+                                const [x, y] = api.coord([price, volume]);
+                                const width = api.size([1, 0])[0] * 0.8;
+                                const height = api.size([0, 1])[1];
+                                return {
+                                    type: 'group',
+                                    children: [
+                                        {
+                                            type: 'rect',
+                                            shape: {
+                                                x: x - width / 2,
+                                                y: y - height / 2,
+                                                width: width,
+                                                height: height
+                                            },
+                                            style: {
+                                                fill: 'rgba(255, 215, 0, 0.5)'
+                                            }
+                                        },
+                                        {
+                                            type: 'text',
+                                            style: {
+                                                text: `${item.buy} | ${item.sell}`,
+                                                x: x,
+                                                y: y,
+                                                textAlign: 'center',
+                                                textVerticalAlign: 'middle'
+                                            }
+                                        }
+                                    ]
+                                };
                             },
-                            data: data.map(item => [item.price, (item.buy + item.sell)]),
-                            itemStyle: {
-                                color: 'rgba(255, 215, 0, 0.5)'
-                            }
+                            data: data.map(item => [item.price, (item.buy + item.sell)])
                         }
                     ]
                 };
@@ -110,10 +183,12 @@
 
             socket.on('footprint_data', (data) => {
                 updateFootprintData(data);
+                updateCvdData(data);
             });
 
             socket.on('footprint_update', (data) => {
                 updateFootprintData(data);
+                updateCvdData(data);
             });
 
             fetch('/api/instruments')
@@ -150,9 +225,10 @@
 
             replayButton.addEventListener('click', () => {
                 const selectedInstrument = instrumentSelect.value;
+                const replaySpeed = document.getElementById('replay-speed-select').value;
                 footprintData = [];
                 renderChart(footprintData);
-                socket.emit('replay_market_data', selectedInstrument);
+                socket.emit('replay_market_data', { instrument_key: selectedInstrument, speed: replaySpeed });
             });
 
             // Fetch initial OI data
