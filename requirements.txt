@@ -1,0 +1,7 @@
+Flask
+Flask-SocketIO
+pymongo
+websocket-client
+gunicorn
+eventlet
+pandas

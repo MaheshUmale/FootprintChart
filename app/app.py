@@ -1,30 +1,109 @@
-from flask import Flask, render_template
+from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO
 import json
 from pymongo import MongoClient
 import websocket
 import threading
-
+import pandas as pd
 app = Flask(__name__)
 socketio = SocketIO(app)
 ws = None
+aggregated_bar = None
+option_chain_df = None
+
+# --- Data Loading ---
+def load_option_chain_data():
+    global option_chain_df
+    try:
+        nifty_df = pd.read_csv('NIFTY_OptionChainData.csv')
+        banknifty_df = pd.read_csv('BANKNIFTY_OptionChainData.csv')
+        option_chain_df = pd.concat([nifty_df, banknifty_df]).set_index('instrument_key')
+        print("Option chain data loaded successfully.")
+    except Exception as e:
+        print(f"Error loading option chain data: {e}")
+        option_chain_df = pd.DataFrame() # Initialize with an empty DataFrame on error
 
 # --- MongoDB Connection ---
 client = MongoClient('mongodb://localhost:27017/')
-db = client['upstox_data']
-collection = db['live_feed']
+db = client['upstox_strategy_db']
+collection = db['tick_data']
 auth_b64 = "ACCESS_TOKEN"  # Replace with your access token
 
 # --- Upstox WebSocket Connection ---
 def on_message(ws, message):
+    global aggregated_bar
     data = json.loads(message)
     collection.insert_one(data)
-    socketio.emit('live_feed', message)
+
+    try:
+        if 'fullFeed' not in data or 'marketFF' not in data['fullFeed']:
+            return
+
+        ff = data['fullFeed']['marketFF']
+        ltpc = ff.get('ltpc')
+        ohlc_list = ff.get('marketOHLC', {}).get('ohlc', [])
+        bid_ask_quotes = ff.get('marketLevel', {}).get('bidAskQuote', [])
+
+        ohlc_1min = next((o for o in ohlc_list if o.get('interval') == 'I1'), None)
+
+        if not ohlc_1min or not ltpc or not ltpc.get('ltp') or not ltpc.get('ltq') or not ltpc.get('ltt'):
+            return
+
+        current_bar_ts = int(ohlc_1min['ts'])
+        trade_price = float(ltpc['ltp'])
+        trade_qty = int(ltpc['ltq'])
+
+        if aggregated_bar and current_bar_ts > aggregated_bar['ts']:
+            socketio.emit('footprint_data', aggregated_bar)
+            aggregated_bar = None
+
+        if not aggregated_bar:
+            aggregated_bar = {
+                'ts': current_bar_ts,
+                'open': trade_price,
+                'high': trade_price,
+                'low': trade_price,
+                'close': trade_price,
+                'volume': 0,
+                'footprint': {}
+            }
+
+        if current_bar_ts < aggregated_bar['ts']:
+            return
+
+        aggregated_bar['high'] = max(aggregated_bar['high'], trade_price)
+        aggregated_bar['low'] = min(aggregated_bar['low'], trade_price)
+        aggregated_bar['close'] = trade_price
+        aggregated_bar['volume'] += trade_qty
+
+        side = 'unknown'
+        for quote in bid_ask_quotes:
+            if trade_price == float(quote['askP']):
+                side = 'buy'
+                break
+        if side == 'unknown':
+            for quote in bid_ask_quotes:
+                if trade_price == float(quote['bidP']):
+                    side = 'sell'
+                    break
+
+        price_level = f"{trade_price:.2f}"
+        if price_level not in aggregated_bar['footprint']:
+            aggregated_bar['footprint'][price_level] = {'buy': 0, 'sell': 0}
+
+        if side in ['buy', 'sell']:
+            aggregated_bar['footprint'][price_level][side] += trade_qty
+
+        socketio.emit('footprint_update', aggregated_bar)
+
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
+        print(f"Error processing message: {e} - Data: {str(data)[:200]}")
 
 def on_error(ws, error):
     print(error)
 
-def on_close(ws):
+
+def on_close(ws, close_status_code, close_msg):
     print("### closed ###")
 
 def on_open(ws):
@@ -42,7 +121,7 @@ def on_open(ws):
 def upstox_websocket():
     global ws
     ws = websocket.WebSocketApp(
-        "wss://api-v2.upstox.com/feed/market-data-feed",
+        "wss://api.upstox.com/v3",
         on_message=on_message,
         on_error=on_error,
         on_close=on_close,
@@ -58,50 +137,142 @@ def upstox_websocket():
 def index():
     return render_template('index.html')
 
+@app.route('/api/instruments')
+def get_instruments():
+    if option_chain_df is not None and not option_chain_df.empty:
+        return jsonify(sorted(option_chain_df.index.unique().tolist()))
+    return jsonify({"error": "Option chain data not loaded"}), 500
+
+@app.route('/api/oi_data/<instrument_key>')
+def get_oi_data(instrument_key):
+    if option_chain_df is not None and not option_chain_df.empty:
+        try:
+            instrument_data = option_chain_df.loc[instrument_key]
+            oi_data = {
+                'open_interest': instrument_data['open_interest'],
+                'oi_change': instrument_data['oi_change']
+            }
+            return jsonify(oi_data)
+        except KeyError:
+            return jsonify({"error": "Instrument not found"}), 404
+    return jsonify({"error": "Option chain data not loaded"}), 500
+
 @socketio.on('connect')
 def connect():
     print('Client connected')
-    # Emit historical data in a single batch
-    historical_data = list(collection.find())
-    print(f"Found {len(historical_data)} historical records.")
-    for data in historical_data:
-        data.pop('_id')
-    socketio.emit('historical_data', json.dumps(historical_data))
+    global aggregated_bar
+    if aggregated_bar:
+        socketio.emit('footprint_update', aggregated_bar)
 
 @socketio.on('change_security')
 def change_security(instrument_key):
-    global current_instrument
+    global current_instrument, aggregated_bar
     print(f"Changing security to {instrument_key}")
-    # Unsubscribe from the old instrument
-    data = {
-        "guid": "someguid",
-        "method": "unsub",
-        "data": {
-            "instrumentKeys": [current_instrument]
+
+    if aggregated_bar:
+        socketio.emit('footprint_data', aggregated_bar)
+
+    aggregated_bar = None
+
+    if ws:
+        # Unsubscribe from the old instrument
+        unsub_data = {
+            "guid": "someguid",
+            "method": "unsub",
+            "data": { "instrumentKeys": [current_instrument] }
         }
-    }
-    ws.send(json.dumps(data))
-    # Subscribe to the new instrument
-    data = {
-        "guid": "someguid",
-        "method": "sub",
-        "data": {
-            "mode": "full",
-            "instrumentKeys": [instrument_key]
+        ws.send(json.dumps(unsub_data))
+
+        # Subscribe to the new instrument
+        sub_data = {
+            "guid": "someguid",
+            "method": "sub",
+            "data": { "mode": "full", "instrumentKeys": [instrument_key] }
         }
-    }
-    ws.send(json.dumps(data))
+        ws.send(json.dumps(sub_data))
+
     current_instrument = instrument_key
-    # Emit historical data for the new instrument
-    historical_data = list(collection.find({'feeds.' + instrument_key: {'$exists': True}}))
-    print(f"Found {len(historical_data)} historical records for {instrument_key}.")
+
+@socketio.on('replay_market_data')
+def replay_market_data(data):
+    global aggregated_bar
+    instrument_key = data['instrument_key']
+    speed = int(data['speed'])
+    print(f"Replaying market data for {instrument_key} with speed {speed}ms")
+    historical_data = list(collection.find({'instrumentKey': instrument_key}))
+
+    tick_count = 0
     for data in historical_data:
-        data.pop('_id')
-    socketio.emit('historical_data', json.dumps(historical_data))
+        try:
+            if 'fullFeed' not in data or 'marketFF' not in data['fullFeed']:
+                continue
+
+            ff = data['fullFeed']['marketFF']
+            ltpc = ff.get('ltpc')
+            ohlc_list = ff.get('marketOHLC', {}).get('ohlc', [])
+            bid_ask_quotes = ff.get('marketLevel', {}).get('bidAskQuote', [])
+            ohlc_1min = next((o for o in ohlc_list if o.get('interval') == 'I1'), None)
+
+            if not ohlc_1min or not ltpc or not ltpc.get('ltp') or not ltpc.get('ltq') or not ltpc.get('ltt'):
+                continue
+
+            current_bar_ts = int(ohlc_1min['ts'])
+            trade_price = float(ltpc['ltp'])
+            trade_qty = int(ltpc['ltq'])
+
+            if aggregated_bar and current_bar_ts > aggregated_bar['ts']:
+                socketio.emit('footprint_data', aggregated_bar)
+                aggregated_bar = None
+
+            if not aggregated_bar:
+                aggregated_bar = {
+                    'ts': current_bar_ts,
+                    'open': trade_price,
+                    'high': trade_price,
+                    'low': trade_price,
+                    'close': trade_price,
+                    'volume': 0,
+                    'footprint': {}
+                }
+
+            if current_bar_ts < aggregated_bar['ts']:
+                continue
+
+            aggregated_bar['high'] = max(aggregated_bar['high'], trade_price)
+            aggregated_bar['low'] = min(aggregated_bar['low'], trade_price)
+            aggregated_bar['close'] = trade_price
+            aggregated_bar['volume'] += trade_qty
+
+            side = 'unknown'
+            for quote in bid_ask_quotes:
+                if trade_price == float(quote['askP']):
+                    side = 'buy'
+                    break
+            if side == 'unknown':
+                for quote in bid_ask_quotes:
+                    if trade_price == float(quote['bidP']):
+                        side = 'sell'
+                        break
+
+            price_level = f"{trade_price:.2f}"
+            if price_level not in aggregated_bar['footprint']:
+                aggregated_bar['footprint'][price_level] = {'buy': 0, 'sell': 0}
+
+            if side in ['buy', 'sell']:
+                aggregated_bar['footprint'][price_level][side] += trade_qty
+
+            socketio.emit('footprint_update', aggregated_bar)
+
+            tick_count += 1
+            if tick_count % 100 == 0 and speed > 0:
+                socketio.sleep(speed / 1000)
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
+            print(f"Error processing message during replay: {e} - Data: {str(data)[:200]}")
+
 
 if __name__ == '__main__':
-    # Start the Upstox WebSocket client in a separate thread
+    load_option_chain_data()
     upstox_thread = threading.Thread(target=upstox_websocket)
     upstox_thread.start()
     current_instrument = "NSE_FO|45450"
-    socketio.run(app, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, port=5003, debug=False, allow_unsafe_werkzeug=True)
