@@ -4,24 +4,17 @@ import json
 from pymongo import MongoClient
 import websocket
 import threading
-import pandas as pd
+import sqlite3
 app = Flask(__name__)
 socketio = SocketIO(app)
 ws = None
 aggregated_bar = None
-option_chain_df = None
 
-# --- Data Loading ---
-def load_option_chain_data():
-    global option_chain_df
-    try:
-        nifty_df = pd.read_csv('NIFTY_OptionChainData.csv')
-        banknifty_df = pd.read_csv('BANKNIFTY_OptionChainData.csv')
-        option_chain_df = pd.concat([nifty_df, banknifty_df]).set_index('instrument_key')
-        print("Option chain data loaded successfully.")
-    except Exception as e:
-        print(f"Error loading option chain data: {e}")
-        option_chain_df = pd.DataFrame() # Initialize with an empty DataFrame on error
+# --- Database Connection ---
+def get_db_connection():
+    conn = sqlite3.connect('trading.db')
+    conn.row_factory = sqlite3.Row
+    return conn
 
 # --- MongoDB Connection ---
 client = MongoClient('mongodb://localhost:27017/')
@@ -139,23 +132,36 @@ def index():
 
 @app.route('/api/instruments')
 def get_instruments():
-    if option_chain_df is not None and not option_chain_df.empty:
-        return jsonify(sorted(option_chain_df.index.unique().tolist()))
-    return jsonify({"error": "Option chain data not loaded"}), 500
+    conn = get_db_connection()
+    instruments = conn.execute('SELECT DISTINCT instrument_key FROM instruments').fetchall()
+    conn.close()
+    return jsonify([instrument['instrument_key'] for instrument in instruments])
 
 @app.route('/api/oi_data/<instrument_key>')
 def get_oi_data(instrument_key):
-    if option_chain_df is not None and not option_chain_df.empty:
-        try:
-            instrument_data = option_chain_df.loc[instrument_key]
-            oi_data = {
-                'open_interest': instrument_data['open_interest'],
-                'oi_change': instrument_data['oi_change']
-            }
-            return jsonify(oi_data)
-        except KeyError:
-            return jsonify({"error": "Instrument not found"}), 404
-    return jsonify({"error": "Option chain data not loaded"}), 500
+    conn = get_db_connection()
+    instrument = conn.execute('SELECT name FROM instruments WHERE instrument_key = ?',
+                              (instrument_key,)).fetchone()
+    if instrument is None:
+        conn.close()
+        return jsonify({"error": "Instrument not found"}), 404
+
+    stock = conn.execute('SELECT id FROM stocks WHERE symbol = ?', (instrument['name'],)).fetchone()
+    if stock is None:
+        conn.close()
+        return jsonify({"error": "Stock not found for the given instrument"}), 404
+
+    oi_data = conn.execute('SELECT call_oi, change_in_call_oi FROM oi_data WHERE stock_id = ? ORDER BY date DESC, timestamp DESC',
+                           (stock['id'],)).fetchone()
+    conn.close()
+
+    if oi_data is None:
+        return jsonify({"error": "OI data not found for the given stock"}), 404
+
+    return jsonify({
+        'open_interest': oi_data['call_oi'],
+        'oi_change': oi_data['change_in_call_oi']
+    })
 
 @socketio.on('connect')
 def connect():
@@ -271,7 +277,6 @@ def replay_market_data(data):
 
 
 if __name__ == '__main__':
-    load_option_chain_data()
     upstox_thread = threading.Thread(target=upstox_websocket)
     upstox_thread.start()
     current_instrument = "NSE_FO|45450"
