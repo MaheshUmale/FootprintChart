@@ -5,6 +5,7 @@ from pymongo import MongoClient
 import websocket
 import threading
 import sqlite3
+from datetime import datetime
 app = Flask(__name__)
 socketio = SocketIO(app)
 ws = None
@@ -140,8 +141,11 @@ def get_instruments():
 @app.route('/api/oi_data/<instrument_key>')
 def get_oi_data(instrument_key):
     conn = get_db_connection()
-    instrument = conn.execute('SELECT name FROM instruments WHERE instrument_key = ?',
-                              (instrument_key,)).fetchone()
+    instrument = conn.execute(
+        'SELECT name, trading_symbol, strike_price, expiry FROM instruments WHERE instrument_key = ?',
+        (instrument_key,)
+    ).fetchone()
+
     if instrument is None:
         conn.close()
         return jsonify({"error": "Instrument not found"}), 404
